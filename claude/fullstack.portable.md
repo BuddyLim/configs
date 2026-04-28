@@ -31,33 +31,19 @@ Guidelines for how Claude should approach development in this codebase.
 
 ---
 
-## FastAPI (Backend)
-
-- Follow a controller / service / repository folder structure. Keep route handlers thin — business logic belongs in the service layer.
-- Services should not import from routes. Repositories should not import from services.
-- Use Pydantic models for all request/response shapes. Don't pass raw dicts across layer boundaries.
-- Prefer explicit dependency injection via `Depends()` over module-level globals.
-
----
-
-## React + Vite (Frontend)
-
-- Co-locate components with the routes that use them unless they're genuinely reusable.
-- Server components by default; opt into client components only when you need interactivity or browser APIs.
-- Data fetching belongs close to where it's rendered — avoid prop-drilling fetched data through multiple layers.
-- Keep API calls in a dedicated layer (e.g. `lib/api/`), not scattered across components.
-
----
-
 ## Testing
 
 - Tests are part of the implementation, not an afterthought. Write them in the same session unless explicitly told otherwise.
 - **Test behaviour, not implementation.** Tests should assert on inputs and outputs, not on how the internals work. If refactoring breaks a test without changing observable behaviour, the test was wrong.
-- **Test at the right layer.** Unit test services and pure logic. Integration test repositories and API routes. Don't unit test things that are better covered by integration tests, and don't write integration tests for things that are trivially covered by unit tests.
-- One test file per module. Keep test structure parallel to source structure (e.g. `tests/services/test_user_service.py` mirrors `app/services/user_service.py`).
+- **Test at the right layer.** Unit test pure logic. Integration test repositories and API routes. Don't write integration tests for things trivially covered by unit tests, and vice versa.
+- One test file per module. Keep test structure parallel to source structure.
 - Prefer real objects over mocks where it's not expensive. Mock at boundaries — external APIs, third-party services, the filesystem — not between internal layers.
 - Each test should have one reason to fail. Avoid asserting on multiple unrelated behaviours in a single test.
 - Tests should be readable as documentation. A test name should describe the scenario and expected outcome: `test_create_user_returns_409_when_email_already_exists`, not `test_create_user_error`.
+
+### Stack: Fill per project
+
+> Add stack-specific conventions here — test runner, directory layout, fixture strategy, CI integration, coverage thresholds.
 
 ---
 
@@ -65,8 +51,7 @@ Guidelines for how Claude should approach development in this codebase.
 
 - **Handle errors at the right layer, not everywhere.** Repositories surface DB exceptions. Services translate them into domain errors. Routes translate domain errors into HTTP responses. Don't catch and re-raise through every layer.
 - Prefer domain-specific exceptions over generic ones. `UserNotFoundError` is more useful than `ValueError("user not found")`.
-- In FastAPI, use exception handlers registered at the app level for consistent HTTP error shaping. Don't write `try/except` blocks in route handlers unless the handling is genuinely route-specific.
-- In Next.js, errors from `lib/api/` should be typed and handled at the component or page level — not swallowed silently or logged to console only.
+- Use a single app-level error handler for consistent HTTP error shaping. Don't write `try/except` blocks in route handlers unless the handling is genuinely route-specific.
 - Never expose internal error details (stack traces, DB messages) in API responses. Log them server-side; return a clean, structured error shape to the client.
 - Distinguish between expected errors (user input, not found, conflict) and unexpected errors (infra failure, unhandled exception). Handle them differently — expected errors are part of the domain, unexpected errors should alert.
 
@@ -98,32 +83,28 @@ Guidelines for how Claude should approach development in this codebase.
 - Consistency with existing patterns in the codebase takes precedence over personal preference.
 - Don't introduce a new dependency without flagging it. Prefer solving problems with what's already in the stack.
 
-## Running Long-Lived CLI Commands (npm, pytest, etc.)
+---
 
-The Bash tool auto-backgrounds commands that take more than a few seconds, and
-the backgrounded process's output is not captured. This affects vitest, pytest,
-and any other command with a slow startup.
+## Worktree Setup
 
-**Workaround — redirect output to a named file, poll for completion, then read and delete:**
+After `git worktree add`, bootstrap both environments before writing any code or starting dev servers:
 
-```bash
-# vitest
-zsh -c 'cd /path/to/frontend && CI=true npm run coverage > /tmp/claude/vitest-coverage.txt 2>&1; echo "EXIT:$?" >> /tmp/claude/vitest-coverage.txt' &
-i=0; until grep -q '^EXIT:' /tmp/claude/vitest-coverage.txt 2>/dev/null; do sleep 2; i=$((i+1)); [ $i -ge 150 ] && echo "EXIT:TIMEOUT" >> /tmp/claude/vitest-coverage.txt && break; done; cat /tmp/claude/vitest-coverage.txt 2>/dev/null; rm -f /tmp/claude/vitest-coverage.txt
+- **Backend:** install dependencies and create a local virtual environment so the language server and type checker discover the correct environment. Without this, type checking and import resolution will fail in the worktree.
+- **Frontend:** install node dependencies. Dev server scripts typically do not install dependencies automatically — if you skip this step, the server will fail to start.
 
-# pytest
-zsh -c 'cd /path/to/backend && python -m pytest tests/ -v > /tmp/claude/pytest-out.txt 2>&1; echo "EXIT:$?" >> /tmp/claude/pytest-out.txt' &
-i=0; until grep -q '^EXIT:' /tmp/claude/pytest-out.txt 2>/dev/null; do sleep 2; i=$((i+1)); [ $i -ge 150 ] && echo "EXIT:TIMEOUT" >> /tmp/claude/pytest-out.txt && break; done; cat /tmp/claude/pytest-out.txt 2>/dev/null; rm -f /tmp/claude/pytest-out.txt
-```
+> Fill in the exact commands for this project's toolchain (e.g. `uv sync`, `bun install`, `npm ci`, `pip install -r requirements.txt`).
 
-Rules:
+---
 
-- Name the file descriptively after the command: `vitest-coverage.txt`, `pytest-resumes.txt`, etc.
-- Append `echo "EXIT:$?" >> <file>` inside the `zsh -c` block to capture the exit code
-- Poll every 2s for the `EXIT:` sentinel — returns as soon as the command finishes, not after a fixed wait
-- Timeout after 150 iterations (300s); injects `EXIT:TIMEOUT` so output still reads cleanly
-- Use `cat ... 2>/dev/null` and `rm -f` to handle the edge case where the file was never created
-- Never use `TaskOutput` to wait for backgrounded npm/pytest runs; the output file approach is reliable
+## Worktree Dev Servers
+
+Each worktree should have scripts that start the backend and frontend dev servers independently. The pattern to follow:
+
+- Scripts start their process in the background and poll until the server is ready, then exit and print the local URL.
+- A separate teardown script stops all processes and cleans up any generated state (ports file, volumes, etc.).
+- **For Claude Code:** start the backend script first and wait for it to print the URL, then start the frontend script and wait for its URL. Report both to the user. No need to run them as background tasks — the scripts handle that internally.
+
+> Fill in the actual script names and any port/config file conventions for this project.
 
 ---
 
@@ -131,20 +112,13 @@ Rules:
 
 Before creating or pushing to a PR branch, run lint and format checks locally so CI doesn't fail on avoidable issues.
 
-**Backend** (from `backend/`):
-```bash
-uv run ruff check .
-uv run ruff format --check .
-# Auto-fix if needed:
-uv run ruff check --fix . && uv run ruff format .
-```
-
-**Frontend** (from `frontend/`):
-```bash
-npm run lint
-```
-
 If either step reports errors, fix them and add a commit before pushing. Don't suppress linter rules — fix the underlying issue.
+
+---
+
+## Stack
+
+> Fill in per project — backend framework, frontend framework, database, test runner, package manager, deployment target.
 
 ---
 
